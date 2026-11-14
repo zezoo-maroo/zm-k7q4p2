@@ -191,6 +191,20 @@ function bindTouch(){document.querySelectorAll('#ctrl [data-k]').forEach(el=>{
 bindTouch();
 const isTouch=('ontouchstart' in window)||navigator.maxTouchPoints>0;
 
+
+// ---------- access gate: only the owner phone and the paired partner phone ----------
+const OWNER_HASH='66eea7b58a441d717e50860bc84327dacb0e45b5e19f8b4931f67dbc5beaf1e4';
+async function sha256(t){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+function lockScreen(title,sub){document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48"><div><div style="font-size:60px">🔒</div><h2>'+title+'</h2><p>'+(sub||'')+'</p></div></div>'}
+let gateOk=false;
+async function runGate(){
+ if(role==='host'){
+  const m=location.hash.match(/[#&]o=([A-Za-z0-9]+)/);
+  if(m){try{if(await sha256(m[1])===OWNER_HASH){store.set('zm_owner_ok',1);history.replaceState(null,'',location.pathname)}}catch(e){}}
+  if(!store.get('zm_owner_ok',0)){lockScreen('هذه لعبة خاصة','الدخول بدعوة فقط.');return false}
+  return true}
+ return true}
+
 // ---------- network: direct phone-to-phone (PeerJS), locked to first device ----------
 let room=null,netReady=false;
 const peers={};let partner=null;
@@ -217,7 +231,7 @@ function wire(c){
     else if(paired!==m.data.dev){try{c.send({topic:'deny'})}catch(e){}setTimeout(()=>{try{c.close()}catch(e){}},400);return}
     if(conn&&conn!==c){try{conn.close()}catch(e){}}conn=c;try{c.send({topic:'welcome',data:{prog:progress}})}catch(e){}setPresence();renderNet();return}
   if(m.topic==='deny'&&role==='guest'){denied=true;try{c.close()}catch(e){}showDenied();return}
-  if(m.topic==='welcome'&&role==='guest'){conn=c;mergeProg(m.data&&m.data.prog);setPresence();renderNet();return}
+  if(m.topic==='welcome'&&role==='guest'){conn=c;store.set('zm_guest_ok',1);hideGuestWait();mergeProg(m.data&&m.data.prog);setPresence();renderNet();return}
   if(m.topic==='prog'){mergeProg(m.data);return}
   if(m.topic==='ev')onEv(m.data);else if(m.topic==='st')onSt(m.data);else if(m.topic==='pres')onPres(m.data)});
  c.on('close',()=>{if(conn===c){conn=null;partner=null;renderNet();if(role==='guest'&&!denied)setTimeout(connectGuest,2500)}});
@@ -238,6 +252,8 @@ function initNet(){
 }
 setInterval(()=>{updatePartner();setPresence();checkJoinBanner()},3000);
 function mergeProg(v){if(!v)return;let ch=false;if(v.unlocked>progress.unlocked){progress.unlocked=v.unlocked;ch=true}for(const k in (v.done||{}))if(!progress.done[k]){progress.done[k]=1;ch=true}if(ch){store.set('zm_prog2',progress);renderGrid()}}
+function showGuestWait(){if(role!=='guest'||store.get('zm_guest_ok',0))return;const d=document.createElement('div');d.id='gwait';d.style.cssText='position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48';d.innerHTML='<div><div style="font-size:54px">💌</div><h2>جارٍ التحقق من الدعوة…</h2><p>لازم يكون صاحب الدعوة فاتح اللعبة الحين.</p></div>';document.body.appendChild(d)}
+function hideGuestWait(){const d=document.getElementById('gwait');if(d)d.remove()}
 function showDenied(){document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48"><div><div style="font-size:60px">🔒</div><h2>هذا الرابط مخصص لشخص واحد فقط</h2><p>ما تقدر تدخل اللعبة من هذا الجهاز.</p></div></div>'}
 function renderNet(){const pi=partnerInfo();
  const txt={connecting:'جارٍ الاتصال…',ready:role==='host'?'جاهز — أرسل رابط الدعوة':'جاهز',waitHost:'بانتظار فتح اللعبة عند الطرف الثاني…',reconnecting:'إعادة الاتصال…',nolib:'تعذّر تحميل الاتصال، تأكد من الإنترنت',err:'مشكلة اتصال، أعد فتح الصفحة',dup:'اللعبة مفتوحة في نافذة ثانية على هذا الجهاز'}[netState]||'';
@@ -715,7 +731,7 @@ function frame(now){const dt=Math.min(0.05,(now-last)/1000);last=now;const t=now
  }else drawTitleBG(t);
  animCards(t);drawStory(t);requestAnimationFrame(frame)}
 requestAnimationFrame(frame);
-document.getElementById('inviteBtn').onclick=shareInvite;document.getElementById('resetBtn').onclick=resetPair;renderNet();initNet();
+document.getElementById('inviteBtn').onclick=shareInvite;document.getElementById('resetBtn').onclick=resetPair;renderNet();runGate().then(ok=>{if(!ok)return;showGuestWait();initNet()});
 window.__qb={genLevel,startLevel,startFight,levelType,state:()=>({scene,game,me,peers,partner,rm:remote()})};
 })();
 </script>
