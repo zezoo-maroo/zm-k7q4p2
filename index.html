@@ -106,7 +106,7 @@ h2{margin:0;font-size:clamp(20px,4vw,30px);color:#7a2a48}
 <div id="banner"><span id="bannerTxt"></span><button class="btn sm pri" id="bannerBtn">انضم</button></div>
 <div id="rot">📱↻<div>أدِر الجوال بالعرض للعب</div></div>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 (()=>{
 "use strict";
@@ -218,44 +218,54 @@ const ICE={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:global.
 let peer=null,conn=null,denied=false,netState='connecting';
 function partnerInfo(){if(partner&&peers[partner]&&performance.now()-peers[partner].seen<10000&&conn&&conn.open)return peers[partner];return null}
 function updatePartner(){let best=null;for(const id in peers){if(id===myId)continue;const p=peers[id];if(performance.now()-p.seen<10000&&(!best||p.seen>peers[best].seen))best=id}partner=best;renderNet()}
-function send(topic,data){if(conn&&conn.open){try{conn.send({topic,data})}catch(e){}}}
+function send(topic,data){if(conn&&conn.open)pub(conn.to,{topic,data})}
 function setPresence(){send('pres',{id:myId,char:myChar,scene,mode,level:curLevel})}
 function touch(id){const p=peers[id]||(peers[id]={pres:{},st:null,seen:0});p.seen=performance.now();return p}
 function onEv(d){if(!d||d.from===myId)return;touch(d.from);updatePartner();handleEv(d)}
 function onSt(d){if(!d||d.id===myId)return;const p=touch(d.id);d._t=performance.now();if(p.st){d._px=p.st.x;d._py=p.st.y}p.st=d;if(partner!==d.id)updatePartner()}
 function onPres(d){if(!d||!d.id||d.id===myId)return;const p=touch(d.id);p.pres=d;updatePartner();refreshCharCards();checkJoinBanner()}
-function wire(c){
- c.on('data',m=>{if(!m||typeof m!=='object')return;
-  if(m.topic==='hello'&&role==='host'){const paired=store.get('zm_paired',null);
-    if(!paired){store.set('zm_paired',m.data.dev)}
-    else if(paired!==m.data.dev){try{c.send({topic:'deny'})}catch(e){}setTimeout(()=>{try{c.close()}catch(e){}},400);return}
-    if(conn&&conn!==c){try{conn.close()}catch(e){}}conn=c;try{c.send({topic:'welcome',data:{prog:progress}})}catch(e){}setPresence();renderNet();return}
-  if(m.topic==='deny'&&role==='guest'){denied=true;try{c.close()}catch(e){}showDenied();return}
-  if(m.topic==='welcome'&&role==='guest'){conn=c;store.set('zm_guest_ok',1);hideGuestWait();mergeProg(m.data&&m.data.prog);setPresence();renderNet();return}
-  if(m.topic==='prog'){mergeProg(m.data);return}
-  if(m.topic==='ev')onEv(m.data);else if(m.topic==='st')onSt(m.data);else if(m.topic==='pres')onPres(m.data)});
- c.on('close',()=>{if(conn===c){conn=null;partner=null;renderNet();if(role==='guest'&&!denied)setTimeout(connectGuest,2500)}});
- c.on('error',()=>{});
+// relay transport over a public MQTT broker (works through any phone network); payloads are AES-GCM encrypted with the invite secret
+const BROKERS=['wss://broker.hivemq.com:8884/mqtt','wss://broker.emqx.io:8084/mqtt'];
+let mq=null,aesKey=null,base='',gid=rid(10),lastHello=0;
+async function deriveNet(sec){const h=await sha256('topic:'+sec);base='zm7/'+h.slice(0,28);const kb=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('key:'+sec));aesKey=await crypto.subtle.importKey('raw',kb,'AES-GCM',false,['encrypt','decrypt'])}
+const b64=u=>btoa(String.fromCharCode(...u)),unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function enc(o){const iv=crypto.getRandomValues(new Uint8Array(12));const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},aesKey,new TextEncoder().encode(JSON.stringify(o))));return b64(iv)+'.'+b64(ct)}
+async function dec(s){const [a,b]=String(s).split('.');const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(a)},aesKey,unb64(b));return JSON.parse(new TextDecoder().decode(pt))}
+function pub(to,m){if(!mq||!mq.connected||!aesKey)return;enc(Object.assign({gid},m)).then(p=>{try{mq.publish(to,p,{qos:0})}catch(e){}}).catch(()=>{})}
+const hostInbox=()=>base+'/h',guestInbox=g=>base+'/g/'+g;
+function onMsg(m){if(!m||typeof m!=='object')return;
+ if(m.topic==='hello'&&role==='host'){const paired=store.get('zm_paired',null);const dev=m.data&&m.data.dev;if(!dev)return;
+   if(!paired)store.set('zm_paired',dev);else if(paired!==dev){pub(guestInbox(m.gid),{topic:'deny'});return}
+   const fresh=!(conn&&conn.gid===m.gid);conn={open:true,gid:m.gid,to:guestInbox(m.gid)};if(fresh){pub(conn.to,{topic:'welcome',data:{prog:progress}});setPresence()}else pub(conn.to,{topic:'welcome'});renderNet();return}
+ if(m.topic==='deny'&&role==='guest'){denied=true;showDenied();return}
+ if(m.topic==='welcome'&&role==='guest'){const fresh=!(conn&&conn.open);conn={open:true,to:hostInbox()};store.set('zm_guest_ok',1);hideGuestWait();if(m.data)mergeProg(m.data.prog);if(fresh)setPresence();renderNet();return}
+ if(role==='host'&&(!conn||conn.gid!==m.gid))return; // ignore anyone not the paired, welcomed partner
+ if(m.topic==='prog'){mergeProg(m.data);return}
+ if(m.topic==='ev')onEv(m.data);else if(m.topic==='st')onSt(m.data);else if(m.topic==='pres')onPres(m.data)}
+function connectBroker(i){
+ if(!window.mqtt){netState='nolib';renderNet();return}
+ const url=BROKERS[i%BROKERS.length];let ok=false;
+ try{mq=mqtt.connect(url,{clientId:'zm_'+rid(12),clean:true,reconnectPeriod:3000,connectTimeout:8000,keepalive:30})}catch(e){netState='err';renderNet();return}
+ mq.on('connect',()=>{ok=true;netState='ready';netReady=true;room=true;mq.subscribe(role==='host'?hostInbox():guestInbox(gid),{qos:0});renderNet();if(role==='guest')helloLoop()});
+ mq.on('message',(t,p)=>{dec(p.toString()).then(onMsg).catch(()=>{})});
+ mq.on('reconnect',()=>{if(netState!=='ready'){netState='reconnecting';renderNet()}});
+ mq.on('offline',()=>{netState='reconnecting';renderNet()});
+ mq.on('error',()=>{});
+ setTimeout(()=>{if(!ok&&i<BROKERS.length-1){try{mq.end(true)}catch(e){}connectBroker(i+1)}},9000);
 }
-function connectGuest(){if(denied||!peer||peer.destroyed)return;if(conn&&conn.open)return;const c=peer.connect(hostPeerId(),{reliable:true,serialization:'json'});
- c.on('open',()=>{try{c.send({topic:'hello',data:{dev:devKey}})}catch(e){}});wire(c);
- setTimeout(()=>{if(!(conn&&conn.open)&&!denied){netState='waitHost';renderNet();connectGuest()}},6000)}
-function initNet(){
- if(!window.Peer){netState='nolib';renderNet();return}
- try{
-  peer=role==='host'?new Peer(hostPeerId(),{config:ICE}):new Peer(undefined,{config:ICE});
-  peer.on('open',()=>{netState='ready';netReady=true;room=true;renderNet();if(role==='guest')connectGuest()});
-  peer.on('connection',c=>{if(role!=='host'){c.close();return}wire(c)});
-  peer.on('disconnected',()=>{netState='reconnecting';renderNet();setTimeout(()=>{try{peer.reconnect()}catch(e){}},2000)});
-  peer.on('error',e=>{const t=e&&e.type;if(t==='unavailable-id'){netState='dup';renderNet()}else if(t==='peer-unavailable'){netState='waitHost';renderNet()}else{netState='err';renderNet()}});
- }catch(e){netState='err';renderNet()}
+function helloLoop(){if(denied)return;if(!(conn&&conn.open)||performance.now()-(peers[partner]?peers[partner].seen:0)>9000){if(conn&&conn.open&&!partnerInfo())conn.open=false;pub(hostInbox(),{topic:'hello',data:{dev:devKey}});if(!(conn&&conn.open)){netState='waitHost';renderNet()}}setTimeout(helloLoop,3000)}
+function connectGuest(){}
+async function initNet(){
+ try{await deriveNet(role==='host'?secret:joinSecret)}catch(e){netState='err';renderNet();return}
+ connectBroker(0);
+ if(role==='host')setInterval(()=>{if(conn&&conn.open&&!partnerInfo()&&peers[partner]===undefined){}},5000);
 }
 setInterval(()=>{updatePartner();setPresence();checkJoinBanner()},3000);
 function mergeProg(v){if(!v)return;let ch=false;if(v.unlocked>progress.unlocked){progress.unlocked=v.unlocked;ch=true}for(const k in (v.done||{}))if(!progress.done[k]){progress.done[k]=1;ch=true}if(ch){store.set('zm_prog2',progress);renderGrid()}}
-function showGuestWait(){if(role!=='guest'||store.get('zm_guest_ok',0))return;const d=document.createElement('div');d.id='gwait';d.style.cssText='position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48';d.innerHTML='<div><div style="font-size:54px">💌</div><h2>جارٍ التحقق من الدعوة…</h2><p>لازم يكون صاحب الدعوة فاتح اللعبة الحين.</p></div>';document.body.appendChild(d)}
+function showGuestWait(){if(role!=='guest'||store.get('zm_guest_ok',0))return;const d=document.createElement('div');d.id='gwait';d.style.cssText='position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48';d.innerHTML='<div><div style="font-size:54px">💌</div><h2>جارٍ التحقق من الدعوة…</h2><p>لازم يكون صاحب الدعوة فاتح اللعبة الحين.</p><p id="gwst" style="opacity:.7;font-size:13px"></p></div>';document.body.appendChild(d)}
 function hideGuestWait(){const d=document.getElementById('gwait');if(d)d.remove()}
 function showDenied(){document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#ffd1e1;font-family:Tahoma;text-align:center;padding:20px;color:#7a2a48"><div><div style="font-size:60px">🔒</div><h2>هذا الرابط مخصص لشخص واحد فقط</h2><p>ما تقدر تدخل اللعبة من هذا الجهاز.</p></div></div>'}
-function renderNet(){const pi=partnerInfo();
+function renderNet(){const pi=partnerInfo();const gw=document.getElementById('gwst');if(gw)gw.textContent={connecting:'جارٍ الاتصال بالإنترنت…',ready:'متصل، ننتظر صاحب الدعوة…',waitHost:'متصل، ننتظر صاحب الدعوة يفتح اللعبة…',reconnecting:'إعادة الاتصال…',nolib:'تعذّر تحميل الاتصال',err:'مشكلة اتصال'}[netState]||'';
  const txt={connecting:'جارٍ الاتصال…',ready:role==='host'?'جاهز — أرسل رابط الدعوة':'جاهز',waitHost:'بانتظار فتح اللعبة عند الطرف الثاني…',reconnecting:'إعادة الاتصال…',nolib:'تعذّر تحميل الاتصال، تأكد من الإنترنت',err:'مشكلة اتصال، أعد فتح الصفحة',dup:'اللعبة مفتوحة في نافذة ثانية على هذا الجهاز'}[netState]||'';
  $('netDot').className='dot'+(pi?' ok':'');$('netDot2').className='dot'+(pi?' ok':'');
  $('netTxt').textContent=pi?'شريكك متصل الآن ♥':txt;
@@ -441,7 +451,7 @@ function updateHud(){if(!game)return;const pn=partnerInfo()?'👫 معًا':'�
  else{$('hudL').textContent='الجولة '+game.round;$('hudH').textContent=myName()+' '+game.wins.me+' : '+game.wins.them+' '+(partnerInfo()?theirName():'الدمية');$('hudP').textContent=''}}
 let bannerT=0,bannerMsg='';function banner(s){bannerMsg=s;bannerT=2.2}
 function remote(){const pi=partnerInfo();if(!pi||!pi.st)return null;const s=pi.st;const lv=game?(game.kind==='fight'?0:game.n):-1;if(s.lv!==lv)return null;
- const a=clamp((performance.now()-s._t)/60,0,1);const px=s._px??s.x,py=s._py??s.y;return Object.assign({},s,{rx:px+(s.x-px)*a,ry:py+(s.y-py)*a})}
+ const a=clamp((performance.now()-s._t)/90,0,1);const px=s._px??s.x,py=s._py??s.y;return Object.assign({},s,{rx:px+(s.x-px)*a,ry:py+(s.y-py)*a})}
 function moverPos(m,t){return m.x0+(m.x1-m.x0)*(Math.sin((t/m.period)*Math.PI*2+m.ph)+1)/2}
 function onPlate(pl,x,y){return Math.abs(x-(pl.x+T/2))<T*0.7&&Math.abs(y-pl.y)<6}
 function die(){if(me.dead>0)return;me.dead=0.7;sfx.die();for(let i=0;i<10;i++)game.parts.push({x:me.x,y:me.y-20,vx:(Math.random()-0.5)*300,vy:-Math.random()*300,l:0.7,c:CH(me.char).body})}
@@ -726,7 +736,7 @@ function frame(now){const dt=Math.min(0.05,(now-last)/1000);last=now;const t=now
  if(scene==='play'&&game){if(!paused){acc+=dt;while(acc>=1/60){const k=game.kind;if(k==='levels')stepLevel(1/60);else if(k==='cook')stepCook(1/60);else if(k==='battle')stepBattle(1/60);else stepFight(1/60);acc-=1/60}}else acc=0;
   const k=game.kind;if(k==='levels')drawLevel(game,t);else if(k==='cook')drawCook(game,t);else if(k==='battle')drawBattle(game,t);else drawFight(game,t);drawParts(dt,game.cam||0);
   if(bannerT>0){bannerT-=dt;ctx.globalAlpha=clamp(bannerT,0,1);ctx.fillStyle='#fff';ctx.fillRect(W/2-220,H/2-40,440,60);ctx.fillStyle='#c2386b';ctx.font='bold 24px Tahoma';ctx.textAlign='center';ctx.fillText(bannerMsg,W/2,H/2);ctx.globalAlpha=1}
-  if(now-lastSend>50){lastSend=now;send('st',{id:myId,lv:game.kind==='fight'?0:game.n,x:Math.round(me.x),y:Math.round(me.y),vx:Math.round(me.vx),f:me.face,g:me.ground?1:0,c:me.char,hp:me.hp,pu:me.punchT>0?1:0,b:me.blk?1:0,hu:me.hurtT>0?1:0,hd:game.kind==='cook'?heldIcon():''})}
+  if(now-lastSend>80){lastSend=now;send('st',{id:myId,lv:game.kind==='fight'?0:game.n,x:Math.round(me.x),y:Math.round(me.y),vx:Math.round(me.vx),f:me.face,g:me.ground?1:0,c:me.char,hp:me.hp,pu:me.punchT>0?1:0,b:me.blk?1:0,hu:me.hurtT>0?1:0,hd:game.kind==='cook'?heldIcon():''})}
   if(Math.random()<0.02)updateHud();
  }else drawTitleBG(t);
  animCards(t);drawStory(t);requestAnimationFrame(frame)}
