@@ -7,7 +7,9 @@
 <style>
 :root{--pink:#ff7aa8;--pink2:#ffd1e1;--ink:#4a2f3a;--cream:#fff7f0;--gold:#ffb84d;--sky1:#ffd8c2;--sky2:#ffeef4}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
-html,body{margin:0;height:100%;background:#2b1b24;overflow:hidden;font-family:"Segoe UI",Tahoma,"Noto Sans Arabic",sans-serif;color:var(--ink);touch-action:none}
+html,body{margin:0;height:100%;background:#2b1b24;overflow:hidden;font-family:"Segoe UI",Tahoma,"Noto Sans Arabic",sans-serif;color:var(--ink)}
+canvas#cv,#ctrl,#ctrl *{touch-action:none}
+.screen,.overlay{touch-action:pan-y;-webkit-overflow-scrolling:touch}
 #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
 canvas{display:block;background:linear-gradient(var(--sky1),var(--sky2));border-radius:14px;box-shadow:0 10px 40px #0008}
 .screen{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:radial-gradient(circle at 50% 30%,#ffe3ec,#ffc7d9 55%,#f59ab8);padding:18px;overflow:auto}
@@ -48,6 +50,9 @@ h2{margin:0;font-size:clamp(20px,4vw,30px);color:#7a2a48}
 .act{position:absolute;right:max(26px,env(safe-area-inset-right));bottom:max(30px,env(safe-area-inset-bottom));width:110px;height:110px;border-radius:50%;background:#ffffffb8;border:4px solid #fff;pointer-events:auto;box-shadow:0 5px 0 #0002;display:flex;align-items:center;justify-content:center;font-size:40px;color:#c2386b}
 .overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#0006;z-index:10}
 .overlay.on{display:flex}
+.overlay{overflow:auto;padding:10px}
+.box{max-height:94vh;overflow:auto}
+@media (max-height:520px){.box{padding:12px 18px;gap:6px}.box h2{font-size:22px}.box .sub{font-size:14px;line-height:1.5}#stCv{width:auto!important;height:26vh!important}.screen{justify-content:flex-start;gap:8px;padding:10px}h1{font-size:40px}.btn{padding:10px 22px;font-size:17px;min-width:160px}.grid{width:min(560px,70vw)}.lv{font-size:13px}}
 #story{z-index:12}
 .box{background:#fff;border-radius:24px;padding:24px 28px;text-align:center;display:flex;flex-direction:column;gap:12px;align-items:center;max-width:90vw;box-shadow:0 10px 0 #f0a3bd}
 .box h2{font-size:30px}
@@ -97,7 +102,7 @@ h2{margin:0;font-size:clamp(20px,4vw,30px);color:#7a2a48}
 </div>
 
 <div class="overlay" id="ovMsg"><div class="box"><h2 id="ovT"></h2><div class="sub" id="ovS"></div><div class="row" id="ovB"></div></div></div>
-<div class="overlay" id="story"><div class="box" style="max-width:560px"><canvas id="stCv" width="380" height="170" style="background:linear-gradient(#fff3f7,#ffe1ea);border-radius:16px;box-shadow:none;width:min(380px,80vw);height:auto"></canvas><h2 id="stT"></h2><div class="sub" id="stL1"></div><div class="sub" id="stL2"></div><button class="btn pri sm" id="stGo">يلا نبدأ ♥</button></div></div>
+<div class="overlay" id="story"><div class="box" style="max-width:560px"><canvas id="stCv" width="380" height="170" style="background:linear-gradient(#fff3f7,#ffe1ea);border-radius:16px;box-shadow:none;width:min(380px,80vw);height:auto"></canvas><h2 id="stT"></h2><div class="sub" id="stL1"></div><div class="sub" id="stL2"></div><button class="btn pri sm" id="stGo" style="position:sticky;bottom:0">يلا نبدأ ♥</button></div></div>
 <div id="banner"><span id="bannerTxt"></span><button class="btn sm pri" id="bannerBtn">انضم</button></div>
 <div id="rot">📱↻<div>أدِر الجوال بالعرض للعب</div></div>
 
@@ -470,7 +475,7 @@ function failLevel(txt){const g=game;if(g.failed||g.won)return;g.failed=true;msg
 // ---------- story ----------
 function maybeStory(n){if((n-1)%20!==0)return;const ch=Math.floor((n-1)/20);const seen=store.get('zm_story',{});if(seen[ch])return;seen[ch]=1;store.set('zm_story',seen);showStory(ch)}
 function showStory(ch){const c=CHAPTERS[ch];if(!c)return;$('stT').textContent='الفصل '+(ch+1)+': '+c[0];$('stL1').textContent=c[1];$('stL2').textContent=c[2];$('story').classList.add('on');storyT=0}
-let storyT=0;$('stGo').onclick=()=>$('story').classList.remove('on');
+let storyT=0;$('stGo').onclick=()=>$('story').classList.remove('on');$('story').addEventListener('click',e=>{if(e.target.id==='story')$('story').classList.remove('on')});
 function drawStory(t){if(!$('story').classList.contains('on'))return;const sc=$('stCv'),g=sc.getContext('2d');g.clearRect(0,0,sc.width,sc.height);const pc=(partnerInfo()&&partnerInfo().pres&&partnerInfo().pres.char)||(myChar==='bunny'?'fox':'bunny');
  g.save();g.translate(120,150);g.scale(1.8,1.8);drawChar(g,myChar,0,0,1,t,{});g.restore();g.save();g.translate(260,150);g.scale(1.8,1.8);drawChar(g,pc,0,0,-1,t+1,{});g.restore();heart(g,190,40+Math.sin(t*3)*6,34)}
 
